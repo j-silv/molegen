@@ -72,18 +72,20 @@ def main():
     atom_info(test_mol, verbose=True)
     bond_info(test_mol, verbose=True)
     adj_matrix, (edge_index, rdkit_edge_types) = connect_info(test_mol, verbose=True)
-    x = node_feature_matrix(test_mol, a2t, verbose=True )
+    x, boa = node_feature_matrix(test_mol, a2t, verbose=True )
     edge_attr = map_rdkit_bond_types(rdkit_edge_types, verbose=True)
 
 
     def prepare_df(mol):
         adj_matrix, (edge_index, rdkit_edge_types) = connect_info(mol)
-        x = node_feature_matrix(mol, a2t)
+        x, y = node_feature_matrix(mol, a2t)
         edge_attr = map_rdkit_bond_types(rdkit_edge_types)
         
-        # need to create the y labels
+        # need to create the y labels for bag-of-atoms ->
+        # a (vocab_size,) shape labels that shows the number of atoms
+        # for each atom 
 
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
         data.validate(raise_on_error=True)
         return data
 

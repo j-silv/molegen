@@ -44,9 +44,22 @@ def main():
 
     # data = dataset[0]
     # result = model(data)
-
-    for batch in loader:
+    
+    model.eval()
+    for idx, batch in enumerate(loader):
         boa, z = model(batch)
+        
+        for token, count in enumerate(batch.y[0]):
+            print(f"{t2a[token]:<2}({count:>3}) ", end="")
+        print("   EXPECTED (1st graph) - batch", idx)
+        
+        for token, logits in enumerate(boa[0]):
+            count = torch.argmax(logits)
+            print(f"{t2a[token]:<2}({count:>3}) ", end="")
+        print("   PREDICTED (1st graph) - batch", idx)  
+        
+        
+        # import code; code.interact(local=locals())
     
     
 
