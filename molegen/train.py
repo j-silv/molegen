@@ -17,7 +17,7 @@ class DataFrameDataset(Dataset):
         return self.data[idx]
       
 def main():
-    DEBUG = False
+    DEBUG = True
     
     df, a2t, t2a, e2t, t2e, max_atoms = prepare_data.main()
 
@@ -39,6 +39,8 @@ def main():
     betas = (0.9, 0.999)
     eps = 1e-08
     epochs = 100
+    lambda_boa = 0
+    lambda_edge = 1
     ###################################################
     
     model = MoleGen(vocab_size=vocab_size, num_layers=num_layers, embd=embd, max_atoms=max_atoms)
@@ -55,6 +57,35 @@ def main():
         for idx, batch in enumerate(loader):
             boa, z, s = model(batch)
             
+            
+            if DEBUG:    
+                # import code; code.interact(local=locals())
+                boa_actual = batch.y_boa[0]
+                boa_pred = torch.argmax(boa[0], dim=-1)
+                
+                for token, (count, pred_count) in enumerate(zip(boa_actual, boa_pred)):
+                    print(f"{t2a[token]}({count}, {pred_count}) | ", end="")
+                print(": ATOM(ACTUAL, PRED) - graph", idx)
+                
+                
+                # select only edges that correspond to first graph 
+                edge = batch.batch[batch.fc_edge_index] # (num_edges, )
+                edge = torch.arange((edge[edge == 0]).shape[0]) # (num_edges_graph0, )
+                edge_pred = s[edge] # (num_edges_graph0, C)
+                edge_pred = torch.argmax(edge_pred, dim=-1) # (num_edges_graph0, )
+                
+                src_atoms = batch.fc_edge_index[0, edge] # (num_edges_graph0, )
+                dest_atoms = batch.fc_edge_index[1, edge] # (num_edges_graph0, )
+                src_atom_feats = batch.x[src_atoms].squeeze(-1) # (num_nodes_graph0, )
+                dest_atom_feats = batch.x[dest_atoms].squeeze(-1) # (num_nodes_graph0, )
+
+                # only show the edges that are not zero because we would have too many otherwise
+                print("\n[ATOM1][ATOM2] (ACTUAL, PRED) - graph", idx)
+                for num, (src, dest, actual, predicted) in enumerate(zip(src_atom_feats, dest_atom_feats, batch.y_fc_edge_attr, edge_pred)):
+                    
+                    if actual != 0 and predicted != 0:
+                        print(f"[{t2a[src.item()]}][{t2a[dest.item()]}] ({actual}, {predicted})")
+            
             # import code; code.interact(local=locals())
             
             optimizer.zero_grad()
@@ -68,28 +99,21 @@ def main():
             loss_edge = loss_fn(s, batch.y_fc_edge_attr.long())
             
             # TODO add loss from other functions
-            loss = loss_boa + loss_edge
+            loss = lambda_boa*loss_boa + lambda_edge*loss_edge
             
             loss_avg += loss.item()
             
             loss.backward()
             
             optimizer.step()
-            
+        
+        print()
         print(f"Avg loss: {loss_avg/len(loader):.5f} | Epoch {epoch}")
+        print()
         
         
         
-        if DEBUG:    
-                
-            for token, count in enumerate(batch.y[0]):
-                print(f"{t2a[token]:<2}({count:>3}) ", end="")
-            print("   EXPECTED (1st graph) - batch", idx)
-            
-            for token, logits in enumerate(boa[0]):
-                count = torch.argmax(logits)
-                print(f"{t2a[token]:<2}({count:>3}) ", end="")
-            print("   PREDICTED (1st graph) - batch", idx)  
+        
     
     
     
