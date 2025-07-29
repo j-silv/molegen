@@ -17,6 +17,7 @@ class DataFrameDataset(Dataset):
         return self.data[idx]
       
 def main():
+    DEBUG = False
     
     df, a2t, t2a, e2t, t2e, max_atoms = prepare_data.main()
 
@@ -47,15 +48,12 @@ def main():
 
     print(model)
 
-    # data = dataset[0]
-    # result = model(data)
-    
     model.eval()
     for epoch in range(epochs):
         loss_avg = 0.0
         
         for idx, batch in enumerate(loader):
-            boa, z = model(batch)
+            boa, z, s = model(batch)
             
             # import code; code.interact(local=locals())
             
@@ -63,7 +61,15 @@ def main():
             
             # we have to permute because loss function expects (N, C, d1, d2, dK)
             # and we have a K-dimensional loss here
-            loss = loss_fn(torch.permute(boa, (0, 2, 1)), batch.y.long())
+            loss_boa = loss_fn(torch.permute(boa, (0, 2, 1)), batch.y_boa.long())
+            
+            # we don't need to change input because s is already with shape (B, C) and
+            # y_fc_edge_attr has shape (B,) with each value between 0 and C
+            loss_edge = loss_fn(s, batch.y_fc_edge_attr.long())
+            
+            # TODO add loss from other functions
+            loss = loss_boa + loss_edge
+            
             loss_avg += loss.item()
             
             loss.backward()
@@ -72,14 +78,18 @@ def main():
             
         print(f"Avg loss: {loss_avg/len(loader):.5f} | Epoch {epoch}")
         
-        for token, count in enumerate(batch.y[0]):
-            print(f"{t2a[token]:<2}({count:>3}) ", end="")
-        print("   EXPECTED (1st graph) - batch", idx)
         
-        for token, logits in enumerate(boa[0]):
-            count = torch.argmax(logits)
-            print(f"{t2a[token]:<2}({count:>3}) ", end="")
-        print("   PREDICTED (1st graph) - batch", idx)  
+        
+        if DEBUG:    
+                
+            for token, count in enumerate(batch.y[0]):
+                print(f"{t2a[token]:<2}({count:>3}) ", end="")
+            print("   EXPECTED (1st graph) - batch", idx)
+            
+            for token, logits in enumerate(boa[0]):
+                count = torch.argmax(logits)
+                print(f"{t2a[token]:<2}({count:>3}) ", end="")
+            print("   PREDICTED (1st graph) - batch", idx)  
     
     
     

@@ -1,9 +1,11 @@
 import torch.nn as nn
-from torch_geometric.data import Data
+from torch_geometric.data import Data, Batch
 from torch_geometric.nn import ResGatedGraphConv
 from torch_geometric.utils import scatter
+from torch_geometric.utils import dense_to_sparse
+import torch
 
-class MLP(nn.Module):
+class MLPAtom(nn.Module):
     """Multi-layer perceptron which gets soft bag of atom
     
     Implementation of Eq. 9 in paper
@@ -32,8 +34,6 @@ class MLP(nn.Module):
         # ah okay the intuition here is that we are going to output a R*vocab_size vector,
         # and then we will reshape it afterwards. 
         
-        
-        
         # not a lot of info on the structure of a simple MLP
         self.mlp = nn.Sequential(
             nn.Linear(embd, embd),
@@ -46,7 +46,27 @@ class MLP(nn.Module):
         
         return boa.view(-1, self.vocab_size, self.max_atoms)
 
+
+class MLPBond(nn.Module):
+    """Multi-layer perceptron which predicts which bond for each edge
+    
+    Implementation of Eq. 11 in paper
+    """
+    def __init__(self, embd=16, num_bonds=4):
+        super().__init__()   
         
+        self.num_bonds = num_bonds
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(embd, embd),
+            nn.ReLU(),
+            nn.Linear(embd, num_bonds),
+        )
+        
+    def forward(self, e):
+        bonds = self.mlp(e)
+        return bonds
+
         
 class GCNAtomLayer(nn.Module):
     """Intermediate class which performs ConvNet, BN, Relu, and Residual for atoms
@@ -99,7 +119,7 @@ class GCNBondLayer(nn.Module):
 
 class MoleGen(nn.Module):
     """Main model for VAE model generating"""
-    def __init__(self, vocab_size=8, embd=16, num_layers=4, max_atoms=100):
+    def __init__(self, vocab_size=8, embd=16, num_layers=4, max_atoms=100, num_bonds=4):
         super().__init__()
         self.vocab_size = vocab_size
         self.embd = embd
@@ -108,20 +128,29 @@ class MoleGen(nn.Module):
         self.aembs = nn.Embedding(vocab_size, embd) # atom embeddings
         self.bembs = nn.Embedding(vocab_size, embd) # bond embeddings
 
-         # GCN atom encoder
+        # GCN atom encoder
         self.gcn_aenc = nn.ModuleList([GCNAtomLayer(embd) for i in range(num_layers)])
 
-        # # GCN bond encoder
+        # GCN bond encoder
         self.gcn_benc = nn.ModuleList([GCNBondLayer(embd) for i in range(num_layers)])
+
+        # GCN atom decoder
+        self.gcn_adec = nn.ModuleList([GCNAtomLayer(embd) for i in range(num_layers)])
+
+        # GCN bond decoder
+        self.gcn_bdec = nn.ModuleList([GCNBondLayer(embd) for i in range(num_layers)])
 
         self.a = nn.Linear(embd, embd)
         self.b = nn.Linear(embd, embd)
         self.c = nn.Linear(embd, embd)
         self.d = nn.Linear(embd, embd)
+        
+        self.u = nn.Linear(embd, embd)
 
         self.sig = nn.Sigmoid()
         
-        self.mlp = MLP(embd, vocab_size, max_atoms)
+        self.mlp_atom = MLPAtom(embd, vocab_size, max_atoms)
+        self.mlp_bond = MLPBond(embd, num_bonds)
 
     def forward(self, input_data):
 
@@ -133,10 +162,10 @@ class MoleGen(nn.Module):
         # aemb.shape           = (num_atoms, embedding_dim)
         # data.edge_attr.shape = (num_bonds)
         # bemb.shape           = (num_bonds, embedding_dim)
-        aemb = self.aembs(x.view(-1))
+        aemb = self.aembs(x.view(-1)) # this is used later for the bond generation
         bemb = self.bembs(edge_attr)
 
-        # we run GCN (only run h for now)
+        # we run GCN
         h = aemb
         e = bemb
 
@@ -149,7 +178,6 @@ class MoleGen(nn.Module):
 
         h_src = h[edge_index[0]]
         h_dest = h[edge_index[1]]
-
 
 
         z = (self.a(e) + self.b(h_src) + self.c(h_dest))*self.d(e)
@@ -170,9 +198,39 @@ class MoleGen(nn.Module):
         # since we have M entries 
         # then once we have a similar looking .batch for edges, we can do the
         # scatter operation to get a per graph output
-        z = scatter(z, batch_edge, dim=0, reduce='sum')
+        z = scatter(z, batch_edge, dim=0, reduce='sum') # (num_graphs, embedding_dim)
         
-        boa = self.mlp(z)
+        boa = self.mlp_atom(z) # (num_graphs, vocab_size, max_atoms)
+
+
+        ######################################################################################
+        # VVVVVVVVVVVVV  untested VVVVVVVVVVVVVVVVVVVVVV
+        ######################################################################################
+
+        fc_bemb = self.u(z) # (num_graphs, embedding_dim) -> this needs to be applied to each edge_attr 
         
-        return boa, z
+        # with this, we can create a new embedding attr matrix
+        # then we will index into the fc_bemb which has e.g. 32 graphs, and we want to apply fc_bemb[0] to 
+        # the total number of edges in the first graph, fc_bemb[1] to total number of edges in second graph,
+        # etc... so this trick turns the node indexes into edge_indexes 
+        fc_batch_edge = input_data.batch[input_data.fc_edge_index[0]]
+        
+        # and then we simply index into our bond embeddings to get the bond embeddings
+        # for each edge per graph! 
+        fc_edge_attr = fc_bemb[fc_batch_edge] #  (num_fc_edges, embedding_dim)
+        
+        # (num_atoms, embedding_dim)
+        fc_aemb = aemb # same as original because the fc graph still has the same nodes in it, just with different bonds
+            
+        h = fc_aemb
+        e = fc_edge_attr
+        for i in range(self.num_layers):
+            data = Data(x=h, edge_index=input_data.fc_edge_index, edge_attr=e)
+            h = self.gcn_adec[i](data)
+            e = self.gcn_bdec[i](data)  
+        
+        s = self.mlp_bond(e)
+        
+        
+        return boa, z, s
 
