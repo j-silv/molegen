@@ -5,8 +5,8 @@ import torch
 from . import data as prepare_data
 from .model import MoleGen
 
-
 class DataFrameDataset(Dataset):
+    """Wrapper class to use Pytorch DataLoader"""
     def __init__(self, df, colname="data"):
         self.data = df[colname].values
 
@@ -17,31 +17,31 @@ class DataFrameDataset(Dataset):
         return self.data[idx]
       
 def main():
-    DEBUG = True
     
-    df, a2t, t2a, e2t, t2e, max_atoms = prepare_data.main()
-
-    torch.manual_seed(42) # reproducibility
-    dataset = DataFrameDataset(df, "data")
-    loader = DataLoader(dataset, batch_size=32, shuffle=True)
-
-    data = next(iter(loader))
-    print(data)
-    
-    # import code; code.interact(local=locals())
-    # import pdb; pdb.set_trace()
-
     ###################################################
+    # Parameters
+    DEBUG = True 
     embd = 16 # embedding size of a vocab indice
-    vocab_size = len(a2t)
     num_layers = 1     # number of GCN layers
     lr = 0.001
     betas = (0.9, 0.999)
     eps = 1e-08
     epochs = 100
-    lambda_boa = 0
-    lambda_edge = 1
+    lambda_boa = 0.5
+    lambda_edge = 0.5
+    batch_size = 32
     ###################################################
+    
+    torch.manual_seed(42)
+    
+    df, a2t, t2a, e2t, t2e, max_atoms = prepare_data.main()
+    vocab_size = len(a2t)
+
+    dataset = DataFrameDataset(df, "data")
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    data = next(iter(loader))
+    print(data)
     
     model = MoleGen(vocab_size=vocab_size, num_layers=num_layers, embd=embd, max_atoms=max_atoms)
     
@@ -57,9 +57,7 @@ def main():
         for idx, batch in enumerate(loader):
             boa, z, s = model(batch)
             
-            
             if DEBUG:    
-                # import code; code.interact(local=locals())
                 boa_actual = batch.y_boa[0]
                 boa_pred = torch.argmax(boa[0], dim=-1)
                 
@@ -85,9 +83,7 @@ def main():
                     
                     if actual != 0 and predicted != 0:
                         print(f"[{t2a[src.item()]}][{t2a[dest.item()]}] ({actual}, {predicted})")
-            
-            # import code; code.interact(local=locals())
-            
+                     
             optimizer.zero_grad()
             
             # we have to permute because loss function expects (N, C, d1, d2, dK)
@@ -98,7 +94,6 @@ def main():
             # y_fc_edge_attr has shape (B,) with each value between 0 and C
             loss_edge = loss_fn(s, batch.y_fc_edge_attr.long())
             
-            # TODO add loss from other functions
             loss = lambda_boa*loss_boa + lambda_edge*loss_edge
             
             loss_avg += loss.item()
@@ -111,12 +106,5 @@ def main():
         print(f"Avg loss: {loss_avg/len(loader):.5f} | Epoch {epoch}")
         print()
         
-        
-        
-        
-    
-    
-    
-
 if __name__ == "__main__":
     main()

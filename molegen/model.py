@@ -1,40 +1,28 @@
 import torch.nn as nn
-from torch_geometric.data import Data, Batch
+from torch_geometric.data import Data
 from torch_geometric.nn import ResGatedGraphConv
 from torch_geometric.utils import scatter
-from torch_geometric.utils import dense_to_sparse
-import torch
 
-class MLPAtom(nn.Module):
-    """Multi-layer perceptron which gets soft bag of atom
+class AtomMLP(nn.Module):
+    """Multi-layer perceptron (MLP) which predicts BOA for each graph
     
-    Implementation of Eq. 9 in paper
+    Implementation of Eq. 9 in paper. This MLP takes in a graph level embedding 'z'
+    and produces a BOA where we essentially get an integer distribution of the predicted atoms
+
+    Args:
+        embd       : embedding dimension for latent space
+        vocab_size : number of unique atoms in training set
+        max_atoms  : max number of total atoms in any molecule
     """
     def __init__(self, embd=16, vocab_size=8, max_atoms=100):
+        
         super().__init__()   
         
         self.vocab_size = vocab_size
         self.max_atoms = max_atoms
         
-        # note that we have an input vector of size (num_graphs, embd)
-        # we need an output vector of size (vocab_size, R) where vocab_size
-        # is 'm' in the paper which means the different atoms we can select
-        # and R is basically a one-hot vector that goes up to the maximum number
-        # of total atoms in any one molecule in the training set
-        #
-        # (small optimization here is to not do the total number of atoms in training set
-        # but simply the highest number of any particular atom, i.e. take C02:
-        # we would only need to have R == 2, since even though we have 3 atoms,
-        # the max number for any single atom is only 2, thus we don't need R == 3.
-        # i think they just simplified it in the paper)
-        #
-        # I'm not sure how to construct this though. I could do like a concatenation thing though
-        # and have m linear layers with all different weights and then just concatenate the output
-        #
-        # ah okay the intuition here is that we are going to output a R*vocab_size vector,
-        # and then we will reshape it afterwards. 
-        
-        # not a lot of info on the structure of a simple MLP
+        # note there isn't much information on the paper on this MLP but I am assuming we
+        # use a nn.ReLU for the activation
         self.mlp = nn.Sequential(
             nn.Linear(embd, embd),
             nn.ReLU(),
@@ -42,15 +30,39 @@ class MLPAtom(nn.Module):
         )
         
     def forward(self, z):
+        """Forward pass of Atom MLP
+        
+        We compute an output vector of size (num_graphs, vocab_size, max_atoms) with
+        the last dimension essentially representing a one-hot vector that has a dimension size
+        up to the maximum number of atoms. We perform the MLP with a flattened last dimension
+        (vocab_size*max_atoms) and then view it as a separate dimension for the loss calculation.
+        
+        Note that a small optimization here 
+        is to not do the total number of atoms in the training set but simply the
+        highest number of any particular atom instead.
+        
+        Args:
+            z   : graph level embedding (num_graphs, embd)
+            
+        Returns:
+            boa : graph level BOA (num_graphs, vocab_size, max_atoms)
+        """
         boa = self.mlp(z)
         
         return boa.view(-1, self.vocab_size, self.max_atoms)
 
 
-class MLPBond(nn.Module):
+class BondMLP(nn.Module):
     """Multi-layer perceptron which predicts which bond for each edge
     
-    Implementation of Eq. 11 in paper
+    Implementation of Eq. 11 in paper. This MLP takes in edge embeddings 'e'
+    and produces an integer distribution of the predicted bond types
+
+    Args:
+        embd       : embedding dimension for latent space
+        num_bonds  : number of unique atoms in training set
+        num_bonds  : number of different types of bonds for classification
+        
     """
     def __init__(self, embd=16, num_bonds=4):
         super().__init__()   
@@ -64,14 +76,30 @@ class MLPBond(nn.Module):
         )
         
     def forward(self, e):
+        """Forward pass of Bond MLP
+        
+        We compute an output vector of size (num_edges, num_bonds) with
+        the last dimension representing a one-hot vector that has a dimension size
+        up to the different types of bonds.
+        
+        Args:
+            e   : edge embedding (num_edges, embd)
+            
+        Returns:
+            bonds : graph level BOA (num_edges, num_bonds)
+        """
         bonds = self.mlp(e)
         return bonds
 
         
-class GCNAtomLayer(nn.Module):
-    """Intermediate class which performs ConvNet, BN, Relu, and Residual for atoms
+class AtomGCNLayer(nn.Module):
+    """Updates atom embeddings with Conv->BN->Relu->Residual
 
     Implementation of Eq. 4 in paper
+
+    Args:
+        embd       : embedding dimension for latent space    
+
     """
     def __init__(self, embd=16):
         super().__init__()
@@ -81,156 +109,198 @@ class GCNAtomLayer(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, data):
+        """Perform forward pass for atom GCN
+        
+        Args:
+            data  : PyG Data() object (possibly batched) with the following attributes:
+                x           : atom token, e.g. x[0] is the embedding vector for atom/node 0 (num_nodes, embd)
+                edge_index  : bond connectivity, e.g. atom at edge_index[0,0] connects to edge_index[1, 0] (2, num_edges)
+                edge_attr   : bond token, e.g. edge_attr[0] is the embedding vector for bond/edge 0 (num_edges, embd)
+                
+        Returns:
+            h     :   Updated node embedding (num_nodes, embd)
+            
+        """ 
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
 
         h = self.gcn(x, edge_index, edge_attr)
         h = self.bn(h)
         h = self.relu(h)
-        h = x + h # resid
+        h = x + h # residual pathway
         return h
 
-class GCNBondLayer(nn.Module):
-    """Intermediate class which performs linear matrix multiply for bonds
+class BondGCNLayer(nn.Module):
+    """Updates bond embeddings with Linear->BN->Relu->Residual
 
     Implementation of Eq. 5 in paper
+    
+    Args:
+        embd       : embedding dimension for latent space
+
     """
 
     def __init__(self, embd=16):
         super().__init__()
-        self.v1 = nn.Linear(embd, embd)
-        self.v2 = nn.Linear(embd, embd)
-        self.v3 = nn.Linear(embd, embd)
+        self.v = nn.ModuleList([nn.Linear(embd,embd) for _ in range(3)])
         self.bn = nn.BatchNorm1d(embd)
         self.relu = nn.ReLU()
 
     def forward(self, data):
+        """Perform forward pass for bond GCN
+        
+        Args:
+            data  : PyG Data() object (possibly batched) with the following attributes:
+                x           : atom token, e.g. x[0] is the embedding vector for atom/node 0 (num_nodes, embd)
+                edge_index  : bond connectivity, e.g. atom at edge_index[0,0] connects to edge_index[1, 0] (2, num_edges)
+                edge_attr   : bond token, e.g. edge_attr[0] is the embedding vector for bond/edge 0 (num_edges, embd)
+                
+        Returns:
+            e     :   Updated edge embedding (num_edges, embd)
+            
+        """
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
 
         h_src = x[edge_index[0]] # oh... apparently we get this for free?
         h_dest = x[edge_index[1]] # apparently pytorch geometric already handles large batch
 
-        e = self.v1(edge_attr) + self.v2(h_src) + self.v3(h_dest)
+        e = self.v[0](edge_attr) + self.v[1](h_src) + self.v[2](h_dest)
 
         e = self.bn(e)
         e = self.relu(e)
 
-        e = edge_attr + e # resid
+        e = edge_attr + e # residual pathway
         return e
 
 class MoleGen(nn.Module):
-    """Main model for VAE model generating"""
+    """Main model for VAE molecular generation
+    
+    This model is an implementation of the paper:
+    A Two-Step Graph Convolutional Decoder for Molecule Generation
+    by Bresson et Laurent (2019). A molecule graph is first encoded 
+    into a latent representation 'z', which is used to produce a 
+    'Bag of Atoms' (BOA). This BOA tells us how many of each atom
+    we have in the predicted molecule, ignoring connectivity. 
+    The second stage takes 'z' and the original input formula and
+    decodes the edge feature connectivity from a fully connected network.
+    
+    Args:
+        vocab_size : number of unique atoms in training set
+        embd       : embedding dimension for latent space
+        num_layers : number of GNN layers (message passing/k-hop distance)
+        max_atoms  : max number of total atoms in any molecule
+        num_bonds  : number of different types of bonds for classification
+    """
     def __init__(self, vocab_size=8, embd=16, num_layers=4, max_atoms=100, num_bonds=4):
+        
         super().__init__()
         self.vocab_size = vocab_size
         self.embd = embd
         self.num_layers = num_layers
 
-        self.aembs = nn.Embedding(vocab_size, embd) # atom embeddings
-        self.bembs = nn.Embedding(vocab_size, embd) # bond embeddings
+        self.atom_embeddings = nn.Embedding(vocab_size, embd) 
+        self.bond_embeddings = nn.Embedding(vocab_size, embd) 
+        self.atom_encoder = nn.ModuleList([AtomGCNLayer(embd) for _ in range(num_layers)])
+        self.bond_encoder = nn.ModuleList([BondGCNLayer(embd) for _ in range(num_layers)])
+        self.atom_decoder = nn.ModuleList([AtomGCNLayer(embd) for _ in range(num_layers)])
+        self.bond_decoder = nn.ModuleList([BondGCNLayer(embd) for _ in range(num_layers)])
 
-        # GCN atom encoder
-        self.gcn_aenc = nn.ModuleList([GCNAtomLayer(embd) for i in range(num_layers)])
+        self.linear = nn.ModuleDict(dict(
+            a=nn.Linear(embd, embd),
+            b=nn.Linear(embd, embd),
+            c=nn.Linear(embd, embd),
+            d=nn.Linear(embd, embd),
+            u=nn.Linear(embd, embd)
+        ))
 
-        # GCN bond encoder
-        self.gcn_benc = nn.ModuleList([GCNBondLayer(embd) for i in range(num_layers)])
-
-        # GCN atom decoder
-        self.gcn_adec = nn.ModuleList([GCNAtomLayer(embd) for i in range(num_layers)])
-
-        # GCN bond decoder
-        self.gcn_bdec = nn.ModuleList([GCNBondLayer(embd) for i in range(num_layers)])
-
-        self.a = nn.Linear(embd, embd)
-        self.b = nn.Linear(embd, embd)
-        self.c = nn.Linear(embd, embd)
-        self.d = nn.Linear(embd, embd)
+        self.sigmoid = nn.Sigmoid()
         
-        self.u = nn.Linear(embd, embd)
-
-        self.sig = nn.Sigmoid()
+        self.atom_mlp = AtomMLP(embd, vocab_size, max_atoms)
+        self.bond_mlp = BondMLP(embd, num_bonds)
         
-        self.mlp_atom = MLPAtom(embd, vocab_size, max_atoms)
-        self.mlp_bond = MLPBond(embd, num_bonds)
-
     def forward(self, input_data):
+        """Forward pass for MoleGen
+        
+        First we look up the atom and bond embeddings, and then apply GCN layers iteratively.
+        Afterwards we reduce the node and edge embeddings into a single graph latent vector 'z'.
+        We apply MLP to 'z' to produce a BOA. Then we use the original 'x' tokens and the 'z' vector
+        to produce an edge probability matrix, which we again apply an MLP to to get 's' which is
+        the predicted bond tokens for each edge of a fully connected network.
+        
+        Args:
+            input_data  : PyG Data() object (possibly batched) with the following attributes:
+                x           : atom token, e.g. x[0] is the integer token for atom/node 0 (num_nodes, 1)
+                edge_index  : bond connectivity, e.g. atom at edge_index[0,0] connects to edge_index[1, 0] (2, num_edges)
+                edge_attr   : bond token, e.g. edge_attr[0] is the integer token for bond/edge 0 (num_edges, )
+                
+        Returns:
+            boa     :   Bag of Atoms prediction (num_graphs, vocab_size, max_atoms)
+            z       :   Per graph latent representation (num_graphs, embd)
+            s       :   Edge probability matrix (num_fc_edges, num_bonds)
+        """
 
-        x, edge_index, edge_attr  = input_data.x, input_data.edge_index, input_data.edge_attr
 
+        ######################################################################################
+        # Encoding step
+        ######################################################################################
 
-        # we look up the embeddings from our table
-        # data.x.shape         = (num_atoms, 1)
-        # aemb.shape           = (num_atoms, embedding_dim)
-        # data.edge_attr.shape = (num_bonds)
-        # bemb.shape           = (num_bonds, embedding_dim)
-        aemb = self.aembs(x.view(-1)) # this is used later for the bond generation
-        bemb = self.bembs(edge_attr)
+        # Get embeddings
+        atom_embedding = self.atom_embeddings(input_data.x.view(-1)) # indexing into embedding needs a flat vector
+        bond_embedding = self.bond_embeddings(input_data.edge_attr)
 
-        # we run GCN
-        h = aemb
-        e = bemb
-
-        # import pdb; pdb.set_trace()
+        # Apply GCN layers iteratively (encoding)
+        h = atom_embedding
+        e = bond_embedding
         for i in range(self.num_layers):
-            data = Data(x=h, edge_index=edge_index, edge_attr=e)
+            data = Data(x=h, edge_index=input_data.edge_index, edge_attr=e)
+            h = self.atom_encoder[i](data)
+            e = self.bond_encoder[i](data)
 
-            h = self.gcn_aenc[i](data)
-            e = self.gcn_benc[i](data)
+        # Extract source and destination atom features 
+        h_src = h[input_data.edge_index[0]]
+        h_dest = h[input_data.edge_index[1]]
 
-        h_src = h[edge_index[0]]
-        h_dest = h[edge_index[1]]
-
-
-        z = (self.a(e) + self.b(h_src) + self.c(h_dest))*self.d(e)
+        # Apply linear and activation before reduction step
+        z = (self.sigmoid(self.linear['a'](e) + self.linear['b'](h_src) + self.linear['c'](h_dest)))*self.linear['d'](e)
         
         # the .batch attribute only maps to nodes
-        # to get a mapping to the edge -> graph (which is what we need)
-        # we simply index into the batch to get the indexes of which
-        # edge corresponds to which graph 
-        batch_edge = input_data.batch[edge_index[0]]
+        # to get a mapping to the edge -> graph we simply index
+        # into the batch to get the indexes of which edge corresponds to which graph 
+        batch_edge = input_data.batch[input_data.edge_index[0]] # (num_edges, )
         
-        # now batch_edge will be of shape (num_edges),
-        # and cruicially it will ressemble .batch but now have 0s for the first
-        # graph's edges, 1s for the second graph's edges, etc.
-        # this is because the edge_index is automatically incremented,
-        # imagine we had a graph with 25 nodes (N) and 30 edges (M)
-        # then edge_index[0, 0:M] will only contain values between 0 and 24 inclusive.
-        # thus, we will convert the 0 to 24 inclusive into a 0 to 29 inclusive 
-        # since we have M entries 
-        # then once we have a similar looking .batch for edges, we can do the
-        # scatter operation to get a per graph output
-        z = scatter(z, batch_edge, dim=0, reduce='sum') # (num_graphs, embedding_dim)
+        # now batch_edge will ressemble input_data.batch but for edges instead of nodes
+        # apply scatter operation to get a per graph output
+        z = scatter(z, batch_edge, dim=0, reduce='sum') # (num_graphs, embd)
         
-        boa = self.mlp_atom(z) # (num_graphs, vocab_size, max_atoms)
+        boa = self.atom_mlp(z) # (num_graphs, vocab_size, max_atoms)
 
 
         ######################################################################################
-        # VVVVVVVVVVVVV  untested VVVVVVVVVVVVVVVVVVVVVV
+        # Decoding step
         ######################################################################################
 
-        fc_bemb = self.u(z) # (num_graphs, embedding_dim) -> this needs to be applied to each edge_attr 
+        # in the bond generation step, each edge gets the same initial feature vector
+        fc_bond_embedding = self.linear['u'](z) # (num_graphs, embd) 
         
-        # with this, we can create a new embedding attr matrix
-        # then we will index into the fc_bemb which has e.g. 32 graphs, and we want to apply fc_bemb[0] to 
-        # the total number of edges in the first graph, fc_bemb[1] to total number of edges in second graph,
-        # etc... so this trick turns the node indexes into edge_indexes 
+        # same trick as before where we convert node mappings to edge mappings
         fc_batch_edge = input_data.batch[input_data.fc_edge_index[0]]
         
-        # and then we simply index into our bond embeddings to get the bond embeddings
-        # for each edge per graph! 
-        fc_edge_attr = fc_bemb[fc_batch_edge] #  (num_fc_edges, embedding_dim)
+        # we index into our bond embeddings to get the bond embeddings
+        # for each edge per graph, since fc_bond_embedding is batched
+        fc_edge_attr = fc_bond_embedding[fc_batch_edge] # (num_fc_edges, embd)
         
-        # (num_atoms, embedding_dim)
-        fc_aemb = aemb # same as original because the fc graph still has the same nodes in it, just with different bonds
-            
-        h = fc_aemb
+        # re-use original atom embedding since the fc graph has the same nodes just with different bonds
+        fc_atom_embedding = atom_embedding # (num_atoms, embd)
+        
+        # Apply GCN layers iteratively (decoding)
+        h = fc_atom_embedding
         e = fc_edge_attr
         for i in range(self.num_layers):
             data = Data(x=h, edge_index=input_data.fc_edge_index, edge_attr=e)
-            h = self.gcn_adec[i](data)
-            e = self.gcn_bdec[i](data)  
+            h = self.atom_decoder[i](data)
+            e = self.bond_decoder[i](data)  
         
-        s = self.mlp_bond(e)
-        
+        # now take each edge and apply MLP to predict bond type for each
+        s = self.bond_mlp(e)
         
         return boa, z, s
 

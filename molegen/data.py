@@ -171,9 +171,6 @@ def map_rdkit_bond_types(rdkit_edge_types, verbose=False):
     return our_edge_types
 
 
-#########################################################################################################################
-#########################################################################################################################
-
 def main():
     tqdm.pandas() # enable progress bars in pandas
     df = pd.read_csv("https://raw.githubusercontent.com/aspuru-guzik-group/chemical_vae/master/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv", nrows=1000)

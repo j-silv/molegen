@@ -1,5 +1,5 @@
 # Molecular generation
 
-This is a project to learn how generative models work and showcase a project for drug discovery. 
+I started this project to get hands-on experience with generative models and explore ML for drug discovery. 
 
-I am replicating the following paper: [A two-step graph convolutional decoder for molecular generation](https://arxiv.org/abs/1906.03412).
+The code is a replication of the following paper: [A Two-Step Graph Convolutional Decoder for Molecule Generation](https://arxiv.org/abs/1906.03412) by Bresson et Laurent (2019).
