@@ -22,14 +22,15 @@ def main():
     # Parameters
     DEBUG = True 
     embd = 16 # embedding size of a vocab indice
-    num_layers = 1     # number of GCN layers
+    num_layers = 3    # number of GCN layers
     lr = 0.001
     betas = (0.9, 0.999)
     eps = 1e-08
     epochs = 100
-    lambda_boa = 0.5
-    lambda_edge = 0.5
-    batch_size = 32
+    lambda_boa = 0.05
+    lambda_edge = 0.95
+    batch_size = 64
+    shuffle = False
     ###################################################
     
     torch.manual_seed(42)
@@ -38,7 +39,7 @@ def main():
     vocab_size = len(a2t)
 
     dataset = DataFrameDataset(df, "data")
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
     data = next(iter(loader))
     print(data)
@@ -58,12 +59,14 @@ def main():
             boa, z, s = model(batch)
             
             if DEBUG:    
+                print(f"SMILES for graph 0: {df['canonical_smiles'].iloc[batch.graph_id[0].item()]}")
+                
                 boa_actual = batch.y_boa[0]
                 boa_pred = torch.argmax(boa[0], dim=-1)
                 
                 for token, (count, pred_count) in enumerate(zip(boa_actual, boa_pred)):
                     print(f"{t2a[token]}({count}, {pred_count}) | ", end="")
-                print(": ATOM(ACTUAL, PRED) - graph", idx)
+                print(": ATOM(ACTUAL, PRED) - batch", idx)
                 
                 
                 # select only edges that correspond to first graph 
@@ -78,11 +81,9 @@ def main():
                 dest_atom_feats = batch.x[dest_atoms].squeeze(-1) # (num_nodes_graph0, )
 
                 # only show the edges that are not zero because we would have too many otherwise
-                print("\n[ATOM1][ATOM2] (ACTUAL, PRED) - graph", idx)
                 for num, (src, dest, actual, predicted) in enumerate(zip(src_atom_feats, dest_atom_feats, batch.y_fc_edge_attr, edge_pred)):
-                    
                     if actual != 0 and predicted != 0:
-                        print(f"[{t2a[src.item()]}][{t2a[dest.item()]}] ({actual}, {predicted})")
+                        print(f"[{t2a[src.item()]}][{t2a[dest.item()]}] ({actual}, {predicted}) - [ATOM1][ATOM2] (ACTUAL, PRED) - batch", idx)
                      
             optimizer.zero_grad()
             

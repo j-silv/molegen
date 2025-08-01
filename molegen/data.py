@@ -123,6 +123,20 @@ def node_feature_matrix(mol, a2t, verbose=False):
     in the molecule
     """
     atoms = atom_info(mol)
+    
+    # SMILES -> atom index mapping, i.e. smile2atom[0]
+    # means that the first (zeroth) element of the smiles string
+    # is the atom index smile2atom[0]
+    # we flip this around to get atom2smile[0] means atom index 0 appears
+    # appears at the position atom2smile[0]
+    # note that this is kind of unnecessary since we already canicalize the SMILES 
+    # and so it will always be in the right order... thus we simply need to convert the position
+    # into one hot vector. we add it for completeness... it would otherwise just be torch.arange(len(atoms))
+    smile2atom = mol.GetProp("_smilesAtomOutputOrder") 
+    smile2atom = [int(x) for x in smile2atom.strip('[]').split(',')]
+    atom2smile = torch.zeros(len(atoms), 1, dtype=torch.int32)
+    for smile_pos, atom_idx in enumerate(smile2atom):
+        atom2smile[atom_idx] = smile_pos
 
     matrix = torch.zeros(len(atoms), 1, dtype=torch.int32)
     # we have an extra dimension here so that PyG working concatenates all graphs along row 0
@@ -137,13 +151,17 @@ def node_feature_matrix(mol, a2t, verbose=False):
         print("NODE_FEATURE_MATRIX:")
         print(matrix)
         print()
-        
+
+        print("POS_FEATURE:")
+        print(atom2smile)
+        print()
+      
         print("BAG_OF_ATOMS_LABEL:")
         print(boa)
         print()
 
 
-    return matrix, boa
+    return matrix, atom2smile, boa
 
 
 def map_rdkit_bond_types(rdkit_edge_types, verbose=False):
@@ -231,6 +249,7 @@ def main():
     ##################################################
     # Sanity check
     test_mol = Chem.MolFromSmiles("C(O)=CN")
+    Chem.MolToSmiles(test_mol) # we have to do this so we populate the _smilesAtomOutputOrder property
     plt.imshow(Draw.MolToImage(test_mol))
 
 
@@ -242,14 +261,16 @@ def main():
     map_rdkit_bond_types(fc_edge_attr, verbose=True)
     ###################################################
 
-    def prepare_df(mol):
+    def prepare_df(row):
+        
+        mol = row['mol']
+        
         (edge_index, edge_attr), (fc_edge_index, y_fc_edge_attr)  = connect_info(mol)
         # y_boa is y labels for bag-of-atoms ->
         # a (vocab_size,) shape labels that shows the number of atoms for each atom 
-        x, y_boa = node_feature_matrix(mol, a2t) 
+        x, pos, y_boa = node_feature_matrix(mol, a2t) 
         edge_attr = map_rdkit_bond_types(edge_attr)
         y_fc_edge_attr = map_rdkit_bond_types(y_fc_edge_attr)
-        
         # note that PyG will automatically increment fc_edge_index
         # as per the following doc:
         # https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.data.Batch.html#torch_geometric.data.Batch
@@ -258,11 +279,13 @@ def main():
                     edge_attr=edge_attr,
                     y_boa=y_boa,
                     fc_edge_index=fc_edge_index,
-                    y_fc_edge_attr=y_fc_edge_attr)
+                    y_fc_edge_attr=y_fc_edge_attr,
+                    pos=pos,
+                    graph_id = torch.tensor([row.name])) # to keep track of this data object and map to SMILES later
         data.validate(raise_on_error=True)
         return data
 
-    df["data"] = df.mol.progress_apply(prepare_df)
+    df["data"] = df.progress_apply(prepare_df, axis=1)
     
     return df, a2t, t2a, e2t, t2e, max_atoms
     

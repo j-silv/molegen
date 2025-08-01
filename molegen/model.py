@@ -2,6 +2,8 @@ import torch.nn as nn
 from torch_geometric.data import Data
 from torch_geometric.nn import ResGatedGraphConv
 from torch_geometric.utils import scatter
+import torch
+import torch.nn.functional as F
 
 class AtomMLP(nn.Module):
     """Multi-layer perceptron (MLP) which predicts BOA for each graph
@@ -196,8 +198,8 @@ class MoleGen(nn.Module):
         self.vocab_size = vocab_size
         self.embd = embd
         self.num_layers = num_layers
+        self.max_atoms = max_atoms
 
-        self.atom_embeddings = nn.Embedding(vocab_size, embd) 
         self.bond_embeddings = nn.Embedding(vocab_size, embd) 
         self.atom_encoder = nn.ModuleList([AtomGCNLayer(embd) for _ in range(num_layers)])
         self.bond_encoder = nn.ModuleList([BondGCNLayer(embd) for _ in range(num_layers)])
@@ -205,6 +207,7 @@ class MoleGen(nn.Module):
         self.bond_decoder = nn.ModuleList([BondGCNLayer(embd) for _ in range(num_layers)])
 
         self.linear = nn.ModuleDict(dict(
+            atom_embedding=nn.Linear(max_atoms + vocab_size, embd),
             a=nn.Linear(embd, embd),
             b=nn.Linear(embd, embd),
             c=nn.Linear(embd, embd),
@@ -242,9 +245,14 @@ class MoleGen(nn.Module):
         ######################################################################################
         # Encoding step
         ######################################################################################
-
-        # Get embeddings
-        atom_embedding = self.atom_embeddings(input_data.x.view(-1)) # indexing into embedding needs a flat vector
+        
+        # Break symmetry and add positional embeddings to atom embeddings
+        one_hot_positions = F.one_hot(input_data.pos.view(-1).long(), num_classes=self.max_atoms) # view avoids extra dimension added
+        one_hot_atom_tokens = F.one_hot(input_data.x.view(-1).long(), num_classes=self.vocab_size)
+        one_hot_concat = torch.cat((one_hot_positions, one_hot_atom_tokens), 1).to(dtype=torch.float32)
+        atom_embedding = self.linear['atom_embedding'](one_hot_concat)
+        
+        # Get bond embeddings
         bond_embedding = self.bond_embeddings(input_data.edge_attr)
 
         # Apply GCN layers iteratively (encoding)
