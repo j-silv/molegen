@@ -52,6 +52,7 @@ def main():
     print(model)
 
     model.eval()
+    MAX_SMILES_STRING = 50
     for epoch in range(epochs):
         loss_avg = 0.0
         
@@ -59,18 +60,19 @@ def main():
             boa, z, s = model(batch)
             
             if DEBUG:    
-                print(f"SMILES for graph 0: {df['canonical_smiles'].iloc[batch.graph_id[0].item()]}")
+                smiles = df['canonical_smiles'].iloc[batch.graph_id[0].item()]
+                
+                print(f"({idx:<2}) {smiles[:MAX_SMILES_STRING]:<{MAX_SMILES_STRING}}{'...' if len(smiles) > MAX_SMILES_STRING else '   '} | ", end="")
                 
                 boa_actual = batch.y_boa[0]
                 boa_pred = torch.argmax(boa[0], dim=-1)
                 
                 for token, (count, pred_count) in enumerate(zip(boa_actual, boa_pred)):
                     print(f"{t2a[token]}({count}, {pred_count}) | ", end="")
-                print(": ATOM(ACTUAL, PRED) - batch", idx)
                 
                 
                 # select only edges that correspond to first graph 
-                edge = batch.batch[batch.fc_edge_index] # (num_edges, )
+                edge = batch.batch[batch.fc_edge_index[0]] # (num_edges, )
                 edge = torch.arange((edge[edge == 0]).shape[0]) # (num_edges_graph0, )
                 edge_pred = s[edge] # (num_edges_graph0, C)
                 edge_pred = torch.argmax(edge_pred, dim=-1) # (num_edges_graph0, )
@@ -81,9 +83,15 @@ def main():
                 dest_atom_feats = batch.x[dest_atoms].squeeze(-1) # (num_nodes_graph0, )
 
                 # only show the edges that are not zero because we would have too many otherwise
+                correct_edges = 0
+                num_edges = 0
                 for num, (src, dest, actual, predicted) in enumerate(zip(src_atom_feats, dest_atom_feats, batch.y_fc_edge_attr, edge_pred)):
-                    if actual != 0 and predicted != 0:
-                        print(f"[{t2a[src.item()]}][{t2a[dest.item()]}] ({actual}, {predicted}) - [ATOM1][ATOM2] (ACTUAL, PRED) - batch", idx)
+                    if actual != 0:
+                        num_edges += 1
+                        if actual == predicted:
+                            correct_edges += 1
+                            
+                print(f"edges {correct_edges}/{num_edges}")
                      
             optimizer.zero_grad()
             
@@ -106,6 +114,6 @@ def main():
         print()
         print(f"Avg loss: {loss_avg/len(loader):.5f} | Epoch {epoch}")
         print()
-        
+
 if __name__ == "__main__":
     main()
