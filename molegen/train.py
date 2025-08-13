@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 import torch
 from . import data as prepare_data
 from .model import MoleGen
+from collections import defaultdict
 
 class DataFrameDataset(Dataset):
     """Wrapper class to use Pytorch DataLoader"""
@@ -23,13 +24,14 @@ def main():
     DEBUG = True 
     embd = 16 # embedding size of a vocab indice
     num_layers = 3    # number of GCN layers
-    lr = 0.001
+    lr = 0.002
     betas = (0.9, 0.999)
     eps = 1e-08
-    epochs = 100
+    epochs = 2000
     lambda_boa = 0.05
-    lambda_edge = 0.95
-    batch_size = 64
+    lambda_edge = 0.45
+    lambda_kl = 0.5
+    batch_size = 128
     shuffle = False
     ###################################################
     
@@ -50,14 +52,22 @@ def main():
     loss_fn = torch.nn.CrossEntropyLoss()
 
     print(model)
+    
+    torch.serialization.add_safe_globals([float])
+    checkpoint = torch.load("molegen.ckpt", weights_only=True)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # epoch = checkpoint['epoch']
+    # loss = checkpoint['loss']
 
-    model.eval()
+    model.train()
     MAX_SMILES_STRING = 50
     for epoch in range(epochs):
-        loss_avg = 0.0
+        loss = dict()
+        avg_loss = defaultdict(float)
         
         for idx, batch in enumerate(loader):
-            boa, z, s = model(batch)
+            boa, z, s, kl = model(batch)
             
             if DEBUG:    
                 smiles = df['canonical_smiles'].iloc[batch.graph_id[0].item()]
@@ -97,23 +107,39 @@ def main():
             
             # we have to permute because loss function expects (N, C, d1, d2, dK)
             # and we have a K-dimensional loss here
-            loss_boa = loss_fn(torch.permute(boa, (0, 2, 1)), batch.y_boa.long())
+            loss['boa'] = loss_fn(torch.permute(boa, (0, 2, 1)), batch.y_boa.long())
             
             # we don't need to change input because s is already with shape (B, C) and
             # y_fc_edge_attr has shape (B,) with each value between 0 and C
-            loss_edge = loss_fn(s, batch.y_fc_edge_attr.long())
+            loss['edge'] = loss_fn(s, batch.y_fc_edge_attr.long())
             
-            loss = lambda_boa*loss_boa + lambda_edge*loss_edge
+            loss['kl'] = kl
             
-            loss_avg += loss.item()
+            loss['total'] = lambda_boa*loss['boa'] + lambda_edge*loss['edge'] + lambda_kl*loss['kl']
+            loss['total'].backward()
             
-            loss.backward()
+            # TODO: add torch inference mode wrapper here?
+            avg_loss['total'] += loss['total'].item()
+            avg_loss['boa'] += loss['boa'].item()
+            avg_loss['edge'] += loss['edge'].item()
+            avg_loss['kl'] += loss['kl'].item()
             
             optimizer.step()
         
         print()
-        print(f"Avg loss: {loss_avg/len(loader):.5f} | Epoch {epoch}")
+        print(f"Epoch {epoch} ------ average losses ------- | ", end="")
+        for name,value in avg_loss.items():
+            print(f"{name}: {value/len(loader):.5f} | ", end="")
         print()
+        print()
+        
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss,
+            'avg_loss': avg_loss
+        }, "molegen.ckpt")
 
 if __name__ == "__main__":
     main()

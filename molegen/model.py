@@ -205,13 +205,19 @@ class MoleGen(nn.Module):
         self.bond_encoder = nn.ModuleList([BondGCNLayer(embd) for _ in range(num_layers)])
         self.atom_decoder = nn.ModuleList([AtomGCNLayer(embd) for _ in range(num_layers)])
         self.bond_decoder = nn.ModuleList([BondGCNLayer(embd) for _ in range(num_layers)])
+        
+        self.N = torch.distributions.Normal(0, 1)
 
         self.linear = nn.ModuleDict(dict(
             atom_embedding=nn.Linear(max_atoms + vocab_size, embd),
-            a=nn.Linear(embd, embd),
-            b=nn.Linear(embd, embd),
-            c=nn.Linear(embd, embd),
-            d=nn.Linear(embd, embd),
+            a_mu=nn.Linear(embd, embd),
+            b_mu=nn.Linear(embd, embd),
+            c_mu=nn.Linear(embd, embd),
+            d_mu=nn.Linear(embd, embd),
+            a_sigma=nn.Linear(embd, embd),
+            b_sigma=nn.Linear(embd, embd),
+            c_sigma=nn.Linear(embd, embd),
+            d_sigma=nn.Linear(embd, embd),
             u=nn.Linear(embd, embd)
         ))
 
@@ -268,7 +274,8 @@ class MoleGen(nn.Module):
         h_dest = h[input_data.edge_index[1]]
 
         # Apply linear and activation before reduction step
-        z = (self.sigmoid(self.linear['a'](e) + self.linear['b'](h_src) + self.linear['c'](h_dest)))*self.linear['d'](e)
+        mu = (self.sigmoid(self.linear['a_mu'](e) + self.linear['b_mu'](h_src) + self.linear['c_mu'](h_dest)))*self.linear['d_mu'](e)
+        sigma = (self.sigmoid(self.linear['a_sigma'](e) + self.linear['b_sigma'](h_src) + self.linear['c_sigma'](h_dest)))*self.linear['d_sigma'](e)
         
         # the .batch attribute only maps to nodes
         # to get a mapping to the edge -> graph we simply index
@@ -277,7 +284,12 @@ class MoleGen(nn.Module):
         
         # now batch_edge will ressemble input_data.batch but for edges instead of nodes
         # apply scatter operation to get a per graph output
-        z = scatter(z, batch_edge, dim=0, reduce='sum') # (num_graphs, embd)
+        mu = scatter(mu, batch_edge, dim=0, reduce='sum') # (num_graphs, embd)
+        sigma = scatter(sigma, batch_edge, dim=0, reduce='sum') # (num_graphs, embd)
+        
+        z = mu + sigma*self.N.sample(mu.shape)
+        
+        kl = -((1 + torch.log(sigma**2) - (mu**2) - (sigma**2)).sum()) # from https://arxiv.org/pdf/1312.6114
         
         boa = self.atom_mlp(z) # (num_graphs, vocab_size, max_atoms)
 
@@ -310,5 +322,5 @@ class MoleGen(nn.Module):
         # now take each edge and apply MLP to predict bond type for each
         s = self.bond_mlp(e)
         
-        return boa, z, s
+        return boa, z, s, kl
 
