@@ -250,7 +250,7 @@ def main():
     # Sanity check
     test_mol = Chem.MolFromSmiles("C(O)=CN")
     Chem.MolToSmiles(test_mol) # we have to do this so we populate the _smilesAtomOutputOrder property
-    plt.imshow(Draw.MolToImage(test_mol))
+    # plt.imshow(Draw.MolToImage(test_mol))
 
 
     atom_info(test_mol, verbose=True)
