@@ -1,9 +1,11 @@
 FROM python:3.13.5-slim
 
+# libxrender1 for rdkit
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
+    libxrender1 \ 
     && rm -rf /var/lib/apt/lists/*
 
 # Set up a new user named "user" with user ID 1000
