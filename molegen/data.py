@@ -129,7 +129,6 @@ class DataframeDataset:
             
         return atom2smile, smile2atom
     
-    
     def parse_mol(self, mol, mol_id=0, verbose=False): 
         """Pandas apply function applied on each mol row in dataframe
         
